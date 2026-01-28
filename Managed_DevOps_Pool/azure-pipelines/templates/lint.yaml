@@ -1,0 +1,28 @@
+parameters:
+- name: terraformPath
+  type: object
+- name: terragruntPath
+  type: object
+
+steps:
+
+- task: Bash@3
+  displayName: "Terraform Format Check"
+  inputs:
+    targetType: inline
+    script: |
+      cd ${{ parameters.terraformPath }}
+      terraform fmt -recursive -check \
+        && echo "✅ Terraform files formatted correctly" \
+        || { echo "❌ Terraform files not formatted correctly. Please run 'terraform fmt -recursive' locally to fix."; exit 1; }
+
+
+- task: Bash@3
+  displayName: "Terragrunt HCL Format Check"
+  inputs:
+    targetType: inline
+    script: |
+      cd ${{ parameters.terragruntPath }}
+      terragrunt hcl format --check \
+        && echo "✅ Terragrunt files formatted correctly" \
+        || { echo "❌ Terragrunt files not formatted correctly. Please run 'terragrunt hcl format' locally to fix."; exit 1; }

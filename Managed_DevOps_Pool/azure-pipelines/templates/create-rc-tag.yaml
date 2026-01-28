@@ -1,0 +1,52 @@
+parameters:
+  - name: poolName
+    type: string
+
+jobs:
+- job: GenerateRCTag
+  displayName: "🏷️ Generate Release Candidate Tag"
+  pool:
+    name: ${{ parameters.poolName }}
+  steps:
+  - checkout: self
+    persistCredentials: true
+    fetchDepth: 0
+
+  - task: Bash@3
+    displayName: "Generate RC Tag"
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+
+        echo "🔎 Fetching tags..."
+        git fetch --tags
+
+        # Get latest stable tag version (exclude RC tags), or start from v0
+        latest_tag=$(git tag -l 'v*' | grep -v 'rc' | sort -V | tail -n 1 || echo "v0")
+
+        # Extract version number and increment
+        version=$(echo $latest_tag | sed 's/^v//')
+        next_version=$((version + 1))
+
+        # Generate timestamp for uniqueness
+        timestamp=$(date +'%Y-%m-%d_%H-%M')
+
+        # Create new RC tag with timestamp
+        new_tag="v${next_version}-rc.${timestamp}"
+
+        echo "📌 Previous stable tag: $latest_tag"
+        echo "🚀 Creating new RC tag: $new_tag"
+
+        # Configure git user for tagging
+        git config user.email "build-agent@devops"
+        git config user.name "Azure DevOps Pipeline"
+
+        # Create and push the new tag
+        git tag $new_tag
+        git push origin $new_tag
+
+        echo "✅ RC tag $new_tag created successfully!"
+        echo "🎯 This will trigger the Production deployment pipeline."
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)

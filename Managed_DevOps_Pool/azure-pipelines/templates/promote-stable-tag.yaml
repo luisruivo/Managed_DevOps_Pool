@@ -1,0 +1,49 @@
+parameters:
+  - name: poolName
+    type: string
+
+jobs:
+- job: GenerateStableTag
+  displayName: "🎯 Promote RC to Stable Release"
+  pool:
+    name: ${{ parameters.poolName }}
+  steps:
+  - checkout: self
+    persistCredentials: true
+    fetchDepth: 0
+
+  - task: Bash@3
+    displayName: "Promote RC to Stable"
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+
+        echo "🔎 Fetching tags..."
+        git fetch --tags
+
+        echo "📋 Extract RC tag from build source"
+        rc_tag="${BUILD_SOURCEBRANCH#refs/tags/}"
+        echo "Current RC Tag: $rc_tag"
+
+        echo "🎯 Checkout the exact RC tag commit"
+        git checkout "$rc_tag"
+
+        echo "🔄 Generate Stable tag (remove -rc.* suffix)"
+        stable_tag=$(echo "$rc_tag" | sed 's/-rc\..*//')
+        echo "Promoting RC $rc_tag to Stable Tag: $stable_tag"
+
+        echo "🏷️ Create Stable tag only if it does not already exist"
+        if ! git rev-parse "$stable_tag" >/dev/null 2>&1; then
+          # Configure git user for tagging
+          git config user.email "build-agent@devops"
+          git config user.name "Azure DevOps Pipeline"
+
+          git tag "$stable_tag"
+          git push origin "$stable_tag"
+          echo "✅ Successfully promoted RC $rc_tag to Stable $stable_tag"
+        else
+          echo "⚠️ Stable tag $stable_tag already exists"
+        fi
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)

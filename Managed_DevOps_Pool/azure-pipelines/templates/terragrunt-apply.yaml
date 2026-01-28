@@ -1,0 +1,27 @@
+# templates/terragrunt-apply.yaml
+parameters:
+  - name: environment
+    type: string
+  - name: basePath
+    type: string
+
+steps:
+  - task: Bash@3
+    displayName: "🚀 Terragrunt Apply ${{ upper(parameters.environment) }}"
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+        cd "${{ parameters.basePath }}/${{ parameters.environment }}"
+
+        # Set environment variable for terragrunt
+        export ENVIRONMENT="${{ parameters.environment }}"
+
+        echo "🔄 Applying Terragrunt plan for ${{ upper(parameters.environment) }} environment..."
+        terragrunt apply -auto-approve tfplan
+
+        echo "✅ ${{ upper(parameters.environment) }} deployment completed successfully!"
+    env:
+      TF_VAR_pat_value: $(azure-devops-pat-${{ parameters.environment }})
+      TF_VAR_admin_ssh_public_key: $(admin-ssh-public-key-${{ parameters.environment }})
+      TF_VAR_client_secret_vmss: $(vmss-agent-pool-sp-secret-${{ parameters.environment }})

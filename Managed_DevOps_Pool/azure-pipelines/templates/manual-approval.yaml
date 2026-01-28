@@ -1,0 +1,61 @@
+parameters:
+  - name: environment
+    type: string
+  - name: previousEnvironment
+    type: string
+  - name: notifyUsers
+    type: string
+
+jobs:
+- job: ManualApproval
+  displayName: "🔐 Manual Approval - ${{ upper(parameters.environment) }}"
+  dependsOn: TerragruntPlan
+  pool:
+    name: server
+  timeoutInMinutes: 1440 # 24 hours
+  steps:
+  - task: ManualValidation@0
+    displayName: "Approve ${{ upper(parameters.environment) }} Deployment"
+    timeoutInMinutes: 1440
+    inputs:
+      notifyUsers: |
+        ${{ parameters.notifyUsers }}
+      ${{ if ne(parameters.previousEnvironment, '') }}:
+        instructions: |
+          Please review the Terragrunt plan for the **${{ upper(parameters.environment) }}** environment.
+
+          **Environment:** ${{ upper(parameters.environment) }}
+          **Build:** $(Build.BuildNumber)
+          **Source:** $(Build.SourceBranchName)
+          **Commit:** $(Build.SourceVersion)
+          **Timeout:** 24 hours
+
+          📋 **Plan Artifacts Published:**
+          - `tfplan-${{ parameters.environment }}` - Terragrunt execution plan
+          - `tfplan-diff-${{ parameters.environment }}` - Comparison with ${{ upper(parameters.previousEnvironment) }} environment
+
+          🔍 **Comparison:** This deployment plan has been compared against the ${{ upper(parameters.previousEnvironment) }} environment. Please review the diff artifact to understand changes.
+
+          **✅ Approve** to proceed with deployment or **❌ Reject** to cancel.
+
+          ⏰ **Note:** This approval will automatically reject after 24 hours if no response.
+      ${{ else }}:
+        instructions: |
+          Please review the Terragrunt plan for the **${{ upper(parameters.environment) }}** environment.
+
+          **Environment:** ${{ upper(parameters.environment) }}
+          **Build:** $(Build.BuildNumber)
+          **Source:** $(Build.SourceBranchName)
+          **Commit:** $(Build.SourceVersion)
+          **Timeout:** 24 hours
+
+          📋 **Plan Artifacts Published:**
+          - `tfplan-${{ parameters.environment }}` - Terragrunt execution plan
+          - `tfplan-diff-${{ parameters.environment }}` - Comparison with ${{ upper(parameters.previousEnvironment) }} environment
+
+          ℹ️ **Note:** This is the initial ${{ upper(parameters.environment) }} deployment plan.
+
+          **✅ Approve** to proceed with deployment or **❌ Reject** to cancel.
+
+          ⏰ **Note:** This approval will automatically reject after 24 hours if no response.
+      onTimeout: 'reject'

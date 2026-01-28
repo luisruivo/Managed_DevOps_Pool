@@ -1,0 +1,173 @@
+name: Deployment Pipeline
+
+trigger:
+  branches:
+    include:
+      - main
+  tags:
+    include:
+      - 'v*-rc.*'
+
+# Pipeline resource for build linkage
+resources:
+  pipelines:
+    - pipeline: buildPipeline
+      source: 'build'
+      trigger:
+        branches:
+          include:
+            - main
+
+variables:
+  # Tool versions
+  - name: terraformVersion
+    value: "1.13.1"
+  - name: terragruntVersion
+    value: "0.86.0"
+
+    # Terragrunt layer paths
+  - name: layerTerragruntBootstrap
+    value: 'infrastructure/layers/bootstrap/environments'
+  - name: layerTerragruntInfra
+    value: 'infrastructure/layers/infra/environments'
+
+  # Determine which build ID to deploy
+  - name: deployBuildId
+    ${{ if ne(parameters.buildId, '') }}:
+      value: ${{ parameters.buildId }}
+    ${{ else }}:
+      value: $(resources.pipeline.buildPipeline.runID)
+
+parameters:
+  - name: buildId
+    displayName: 'Build ID'
+    type: string
+    default: '' # empty for automatic build
+
+  - name: environments
+    type: object
+    default:
+      - name: dev
+        poolName: 'devops-agent-pool-dev-core'  # Change this for the other self-hosted agent solutions: 'vmss-devops-agents-dev-core' or 'classic-vmss-devops-agents-dev-core'
+        variableGroup: 'pipeline-secrets-dev'
+        serviceConnection: 'azure-oidc-dev'
+        notifyUsers: 'luis.ruivo.node4@gmail.com'
+        requiresApproval: true
+        buildId: $(deployBuildId)
+        condition: or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.Reason'], 'Manual'))
+      # - name: test
+      #   poolName: 'devops-agent-pool-test-core' # Change this for the other self-hosted agent solutions: 'vmss-devops-agents-dev-core' or 'classic-vmss-devops-agents-dev-core'
+      #   variableGroup: 'pipeline-secrets-test'
+      #   serviceConnection: 'azure-oidc-test'
+      #   notifyUsers: 'luis.ruivo.node4@gmail.com'
+      #   requiresApproval: true
+      #   condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+      # - name: prod
+      #   poolName: 'devops-agent-pool-prod-core' # Change this for the other self-hosted agent solutions: 'vmss-devops-agents-dev-core' or 'classic-vmss-devops-agents-dev-core'
+      #   variableGroup: 'pipeline-secrets-prod'
+      #   serviceConnection: 'azure-oidc-prod'
+      #   notifyUsers: 'luis.ruivo.node4@gmail.com'
+      #   requiresApproval: true
+      #   condition: and(startsWith(variables['Build.SourceBranch'], 'refs/tags/v'), contains(variables['Build.SourceBranch'], '-rc.'))
+
+stages:
+# ====================================================================
+# DEV STAGE - Runs when code is merged to main branch
+# ====================================================================
+- ${{ each env in parameters.environments }}:
+  - ${{ if eq(env.name, 'dev') }}:
+    - stage: Deploy_${{ env.name }}
+      displayName: "🔧 Deploy to ${{ upper(env.name) }}"
+      condition: ${{ env.condition }}
+      jobs:
+      - template: templates/terragrunt-deployment-template.yaml
+        parameters:
+          environment: ${{ env.name }}
+          poolName: ${{ env.poolName }}
+          variableGroup: ${{ env.variableGroup }}
+          serviceConnection: ${{ env.serviceConnection }}
+          terragruntVersion: $(terragruntVersion)
+          terraformVersion: $(terraformVersion)
+          notifyUsers: ${{ env.notifyUsers }}
+          requiresApproval: ${{ env.requiresApproval }}
+          buildId: $(deployBuildId)
+          layers:
+            # - ${{ variables.layerTerragruntBootstrap }} # To run bootstrap layer
+            - ${{ variables.layerTerragruntInfra }}     # To run infra layer
+
+# # ====================================================================
+# # TEST STAGE - Runs automatically after Dev succeeds
+# # ====================================================================
+# - ${{ each env in parameters.environments }}:
+#   - ${{ if eq(env.name, 'test') }}:
+#     - stage: Deploy_${{ env.name }}
+#       displayName: "🧪 Deploy to ${{ upper(env.name) }}"
+#       dependsOn: Deploy_dev
+#       condition: ${{ env.condition }}
+#       jobs:
+#       - template: templates/terragrunt-deployment-template.yaml
+#         parameters:
+#           environment: ${{ env.name }}
+#           poolName: ${{ env.poolName }}
+#           variableGroup: ${{ env.variableGroup }}
+#           serviceConnection: ${{ env.serviceConnection }}
+#           terragruntVersion: $(terragruntVersion)
+#           terraformVersion: $(terraformVersion)
+#           notifyUsers: ${{ env.notifyUsers }}
+#           requiresApproval: ${{ env.requiresApproval }}
+#           buildId: $(deployBuildId)
+#           layers:
+#             - ${{ variables.layerTerragruntBootstrap }} # To run bootstrap layer
+#             - ${{ variables.layerTerragruntInfra }}     # To run infra layer
+
+# # ====================================================================
+# # CREATE RC TAG - Runs after Test deployment succeeds
+# # ====================================================================
+# - ${{ each env in parameters.environments }}:
+#   - ${{ if eq(env.name, 'test') }}:
+#     - stage: CreateRCTag
+#       displayName: "🏷️ Create Release Candidate Tag"
+#       dependsOn: Deploy_test
+#       condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+#       jobs:
+#       - template: templates/create-rc-tag.yaml
+#         parameters:
+#           poolName: ${{ env.poolName }}
+
+# # ====================================================================
+# # PROD STAGE - Runs when RC tag is created
+# # ====================================================================
+# - ${{ each env in parameters.environments }}:
+#   - ${{ if eq(env.name, 'prod') }}:
+#     - stage: Deploy_${{ env.name }}
+#       displayName: "🚀 Deploy to ${{ upper(env.name) }}"
+#       condition: ${{ env.condition }}
+#       jobs:
+#       - template: templates/terragrunt-deployment-template.yaml
+#         parameters:
+#           environment: ${{ env.name }}
+#           poolName: ${{ env.poolName }}
+#           variableGroup: ${{ env.variableGroup }}
+#           serviceConnection: ${{ env.serviceConnection }}
+#           terragruntVersion: $(terragruntVersion)
+#           terraformVersion: $(terraformVersion)
+#           notifyUsers: ${{ env.notifyUsers }}
+#           requiresApproval: ${{ env.requiresApproval }}
+#           buildId: $(deployBuildId)
+#           layers:
+#             - ${{ variables.layerTerragruntBootstrap }} # To run bootstrap layer
+#             - ${{ variables.layerTerragruntInfra }}     # To run infra layer
+
+# # ====================================================================
+# # PROMOTE TO STABLE - Runs after Prod deployment succeeds
+# # ====================================================================
+# - ${{ each env in parameters.environments }}:
+#   - ${{ if eq(env.name, 'prod') }}:
+#     - stage: PromoteStableTag
+#       displayName: "✨ Promote RC to Stable Release"
+#       dependsOn: Deploy_prod
+#       condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'), contains(variables['Build.SourceBranch'], '-rc.'))
+#       jobs:
+#       - template: templates/promote-stable-tag.yaml
+#         parameters:
+#           poolName: ${{ env.poolName }}

@@ -1,0 +1,212 @@
+name: Bootstrap Pipeline
+
+trigger: none
+pr: none
+
+parameters:
+  - name: targetEnv
+    displayName: 'Target Environment'
+    type: string
+    default: 'dev'
+    values:
+      - dev
+      - test
+      - prod
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: 'bootstrap-sp-secrets'
+
+  # Path variables
+  - name: terraformPath
+    value: 'infrastructure'
+  - name: terragruntPath
+    value: 'infrastructure'
+  - name: terragruntBasePath
+    value: 'infrastructure/layers/bootstrap/environments' # Adjust as needed: bootstrap layer path or infra layer path
+
+  # Tool versions
+  - name: terraformVersion
+    value: '1.13.1'
+  - name: terragruntVersion
+    value: '0.86.0'
+
+  # Azure Key Vault configuration
+  - name: azureSubscription
+    value: 'ado-bootstrap-sp-connection'
+  - name: keyVaultName
+    value: 'bootstrap-sp-kv-luis'
+  - name: keyVaultSecretsFilter
+    value: 'ARM-CLIENT-ID,ARM-CLIENT-SECRET,ARM-TENANT-ID,ARM-SUBSCRIPTION-ID,azure-devops-pat-bootstrap,devops-infrastructure-key-public'
+
+jobs:
+  - job: Plan_Infrastructure
+    displayName: "Plan Bootstrap Infrastructure - ${{ parameters.targetEnv }}"
+    steps:
+      - checkout: self
+
+      - template: templates/install-tools.yaml
+        parameters:
+          terraformVersion: $(terraformVersion)
+          terragruntVersion: $(terragruntVersion)
+
+      - task: AzureKeyVault@2
+        inputs:
+          azureSubscription: $(azureSubscription)
+          KeyVaultName: $(keyVaultName)
+          SecretsFilter: $(keyVaultSecretsFilter)
+          RunAsPreJob: true
+
+      - script: |
+          az login --service-principal -u $(ARM-CLIENT-ID) -p $(ARM-CLIENT-SECRET) --tenant $(ARM-TENANT-ID)
+          az account set --subscription $(ARM-SUBSCRIPTION-ID)
+        displayName: 'Azure CLI Login'
+        env:
+          ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+          ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+          ARM_TENANT_ID: $(ARM-TENANT-ID)
+          ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+
+      - template: templates/lint.yaml
+        parameters:
+          terraformPath: '$(terraformPath)'
+          terragruntPath: '$(terragruntPath)'
+
+      - template: templates/terragrunt-init.yaml
+        parameters:
+          environment: ${{ parameters.targetEnv }}
+          basePath: $(terragruntBasePath)
+
+      - template: templates/terragrunt-validate.yaml
+        parameters:
+          environment: ${{ parameters.targetEnv }}
+          basePath: $(terragruntBasePath)
+
+      - script: |
+          set -euo pipefail
+          cd "$(terragruntBasePath)/${{ parameters.targetEnv }}"
+          terragrunt plan -out=tfplan
+        displayName: 'Terragrunt Plan'
+        env:
+          ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+          ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+          ARM_TENANT_ID: $(ARM-TENANT-ID)
+          ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+          TF_VAR_pat_value: $(azure-devops-pat-bootstrap)
+          TF_VAR_admin_ssh_public_key: $(devops-infrastructure-key-public)
+
+      - script: |
+          set -euo pipefail
+          cd "$(terragruntBasePath)/${{ parameters.targetEnv }}"
+          echo "=========================================="
+          echo "TERRAFORM PLAN OUTPUT - REVIEW BELOW"
+          echo "=========================================="
+          terragrunt show -no-color tfplan
+          echo "=========================================="
+        displayName: 'Display Terraform Plan'
+        env:
+          ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+          ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+          ARM_TENANT_ID: $(ARM-TENANT-ID)
+          ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+
+      - script: |
+          set -euo pipefail
+          cd "$(terragruntBasePath)/${{ parameters.targetEnv }}"
+          terragrunt show -no-color tfplan > $(Build.ArtifactStagingDirectory)/terraform-plan-output.txt
+        displayName: 'Save Terraform Plan to Artifact'
+        env:
+          ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+          ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+          ARM_TENANT_ID: $(ARM-TENANT-ID)
+          ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+
+      - publish: $(Build.ArtifactStagingDirectory)/terraform-plan-output.txt
+        artifact: terraform-plan-output
+        displayName: 'Publish Terraform Plan Output'
+
+  - job: Approve_Apply
+    displayName: "Approve Apply - ${{ parameters.targetEnv }}"
+    dependsOn: Plan_Infrastructure
+    pool: server
+    steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: ''
+          instructions: |
+            ⚠️ DEPLOYMENT ⚠️
+
+            Review the Terraform plan before approving.
+
+            1. Download the 'terraform-plan-output' artifact to review detailed changes
+            2. Check the 'Display Terraform Plan' step in the Plan_Infrastructure job
+
+            This will create foundational infrastructure (storage accounts, state backends, etc.)
+
+            Environment: ${{ parameters.targetEnv }}
+
+            Click 'Resume' to apply or 'Reject' to cancel.
+          onTimeout: 'reject'
+
+  - job: Apply_Infrastructure
+    displayName: "Apply Bootstrap Infrastructure - ${{ parameters.targetEnv }}"
+    dependsOn: Approve_Apply
+    steps:
+      - checkout: self
+
+      - template: templates/install-tools.yaml
+        parameters:
+          terraformVersion: $(terraformVersion)
+          terragruntVersion: $(terragruntVersion)
+
+      - task: AzureKeyVault@2
+        inputs:
+          azureSubscription: $(azureSubscription)
+          KeyVaultName: $(keyVaultName)
+          SecretsFilter: $(keyVaultSecretsFilter)
+          RunAsPreJob: true
+
+      - script: |
+          az login --service-principal -u $(ARM-CLIENT-ID) -p $(ARM-CLIENT-SECRET) --tenant $(ARM-TENANT-ID)
+          az account set --subscription $(ARM-SUBSCRIPTION-ID)
+        displayName: 'Azure CLI Login'
+        env:
+          ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+          ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+          ARM_TENANT_ID: $(ARM-TENANT-ID)
+          ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+
+      - template: templates/terragrunt-init.yaml
+        parameters:
+          environment: ${{ parameters.targetEnv }}
+          basePath: $(terragruntBasePath)
+
+      - script: |
+          set -euo pipefail
+          cd "$(terragruntBasePath)/${{ parameters.targetEnv }}"
+
+          echo "=========================================="
+          echo "RE-RUNNING PLAN TO ENSURE CONSISTENCY"
+          echo "=========================================="
+          terragrunt plan -out=tfplan-apply
+
+          echo "=========================================="
+          echo "FINAL PLAN BEFORE APPLY"
+          echo "=========================================="
+          terragrunt show -no-color tfplan-apply
+
+          echo "=========================================="
+          echo "APPLYING CHANGES"
+          echo "=========================================="
+          terragrunt apply -auto-approve tfplan-apply
+        displayName: 'Terragrunt Apply Bootstrap'
+        env:
+          ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+          ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+          ARM_TENANT_ID: $(ARM-TENANT-ID)
+          ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+          TF_VAR_pat_value: $(azure-devops-pat-bootstrap)
+          TF_VAR_admin_ssh_public_key: $(devops-infrastructure-key-public)

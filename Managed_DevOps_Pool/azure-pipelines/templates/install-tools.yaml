@@ -1,0 +1,38 @@
+parameters:
+  - name: terraformVersion
+    type: string
+  - name: terragruntVersion
+    type: string
+
+steps:
+
+- task: Bash@3
+  displayName: "Install unzip if not available"
+  inputs:
+    targetType: inline
+    script: |
+      set -euo pipefail
+      if ! command -v unzip &> /dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y unzip
+      fi
+
+- task: Bash@3
+  displayName: "Install Terraform"
+  inputs:
+    targetType: inline
+    script: |
+      wget https://releases.hashicorp.com/terraform/${{ parameters.terraformVersion }}/terraform_${{ parameters.terraformVersion }}_linux_amd64.zip
+      unzip terraform_${{ parameters.terraformVersion }}_linux_amd64.zip
+      sudo mv terraform /usr/local/bin/
+      terraform version
+
+- task: Bash@3
+  displayName: "Install Terragrunt"
+  inputs:
+    targetType: inline
+    script: |
+      wget https://github.com/gruntwork-io/terragrunt/releases/download/v${{ parameters.terragruntVersion }}/terragrunt_linux_amd64
+      sudo mv terragrunt_linux_amd64 /usr/local/bin/terragrunt
+      sudo chmod +x /usr/local/bin/terragrunt
+      terragrunt --version

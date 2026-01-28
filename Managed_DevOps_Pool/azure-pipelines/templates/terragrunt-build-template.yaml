@@ -1,0 +1,46 @@
+parameters:
+  - name: environment
+    type: string
+  - name: poolName
+    type: string
+  - name: variableGroup
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: basePath
+    type: string
+  - name: terragruntVersion
+    type: string
+  - name: terraformVersion
+    type: string
+
+jobs:
+- job: Build_Terragrunt
+  displayName: "🛠️ Terragrunt Build - ${{ upper(parameters.environment) }}"
+  pool:
+    name: ${{ parameters.poolName }}
+  variables:
+    - group: ${{ parameters.variableGroup }}
+
+  steps:
+    - checkout: self
+
+    - template: azure-oidc-auth.yaml
+      parameters:
+        serviceConnection: ${{ parameters.serviceConnection }}
+
+    - template: install-tools.yaml
+      parameters:
+        terragruntVersion: ${{ parameters.terragruntVersion }}
+        terraformVersion: ${{ parameters.terraformVersion }}
+
+    - template: terragrunt-init.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ parameters.basePath }}
+
+    - template: terragrunt-plan.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ parameters.basePath }}
+

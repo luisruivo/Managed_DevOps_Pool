@@ -1,0 +1,30 @@
+parameters:
+  - name: environment
+    type: string
+  - name: basePath
+    type: string
+  - name: displayName
+    type: string
+    default: ''
+
+steps:
+- task: Bash@3
+  displayName: ${{ coalesce(parameters.displayName, format('Terragrunt Init - {0}', parameters.environment)) }}
+  inputs:
+    targetType: inline
+    script: |
+      set -euo pipefail
+
+      dir="${{ parameters.basePath }}/${{ parameters.environment }}"
+      echo "🔄 Running terragrunt init in $dir..."
+
+      if [ -d "$dir" ]; then
+        pushd "$dir"
+        export ENVIRONMENT="${{ parameters.environment }}"
+        terragrunt init
+        popd
+        echo "✅ Terragrunt init completed for ${{ parameters.environment }}"
+      else
+        echo "⚠️ Directory $dir not found, skipping ${{ parameters.environment }}"
+        exit 1
+      fi

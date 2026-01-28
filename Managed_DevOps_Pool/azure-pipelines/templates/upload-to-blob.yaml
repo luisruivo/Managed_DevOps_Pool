@@ -1,0 +1,33 @@
+parameters:
+  - name: environment
+    type: string
+  - name: serviceConnection
+    type: string
+
+steps:
+  - task: Bash@3
+    displayName: "🔎 DNS Lookup for Storage Account Private Endpoint"
+    inputs:
+      targetType: inline
+      script: |
+        echo "Resolving storage account endpoint..."
+        echo "dig result:"
+        dig +short saluis${{ parameters.environment }}.blob.core.windows.net || true
+        echo ""
+        echo "nslookup result:"
+        nslookup saluis${{ parameters.environment }}.blob.core.windows.net || true
+
+  - task: AzureCLI@2
+    displayName: "Upload repo.txt to Blob Storage"
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        az storage blob upload \
+          --account-name saluis${{ parameters.environment }}tfstate \
+          --container-name repo-files-${{ parameters.environment }} \
+          --file $(Build.SourcesDirectory)/app/repo.txt \
+          --name repo.txt \
+          --auth-mode login \
+          --overwrite

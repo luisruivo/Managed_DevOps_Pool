@@ -1,0 +1,252 @@
+parameters:
+  - name: environment
+    type: string
+  - name: poolName
+    type: string
+  - name: variableGroup
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: terragruntVersion
+    type: string
+  - name: terraformVersion
+    type: string
+  - name: notifyUsers
+    type: string
+  - name: requiresApproval
+    type: boolean
+  - name: buildId
+    type: string
+  - name: layers
+    type: object
+
+jobs:
+# ====================================================================
+# Download and Display Plan (Before Approval)
+# ====================================================================
+- job: Preview_Plan
+  displayName: "👁️ Preview Plan - Build ${{ parameters.buildId }}"
+  pool:
+    name: ${{ parameters.poolName }}
+  variables:
+    - group: ${{ parameters.variableGroup }}
+
+  steps:
+  - checkout: none
+
+  - task: DownloadPipelineArtifact@2
+    displayName: "📥 Download Build ${{ parameters.buildId }}"
+    inputs:
+      source: 'specific'
+      project: '$(System.TeamProjectId)'
+      pipeline: 'Build Pipeline'
+      buildVersionToDownload: 'specific'
+      buildId: ${{ parameters.buildId }}
+      patterns: 'tfplan-${{ parameters.environment }}-**/*'
+      targetPath: '$(Pipeline.Workspace)/build-artifacts'
+
+  - template: install-tools.yaml
+    parameters:
+      terragruntVersion: ${{ parameters.terragruntVersion }}
+      terraformVersion: ${{ parameters.terraformVersion }}
+
+  # Display all plans
+  - script: |
+      set -e
+
+      echo "##[section]=== Terraform Plans from Build ${{ parameters.buildId }} ==="
+      echo ""
+
+      # Debug: Show what we downloaded
+      echo "🔍 Downloaded artifacts:"
+      find $(Pipeline.Workspace)/build-artifacts -type f | head -20
+      echo ""
+
+      PLAN_COUNT=0
+
+      for plan_artifact in $(Pipeline.Workspace)/build-artifacts/tfplan-${{ parameters.environment }}-*; do
+        if [ -d "$plan_artifact" ]; then
+
+          artifact_name=$(basename "$plan_artifact")
+          layer_path=$(echo "$artifact_name" | sed 's/^tfplan-${{ parameters.environment }}-//' | tr '-' '/')
+
+          echo "##[group]📋 Plan for: $layer_path"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Show what files exist in this artifact
+          echo "📦 Files in artifact:"
+          ls -la "$plan_artifact/"
+          echo ""
+
+          # Display plan summary if available
+          if [ -f "$plan_artifact/plan-summary.txt" ]; then
+            echo "📋 Plan Summary:"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            cat "$plan_artifact/plan-summary.txt"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "✅ Plan summary displayed successfully"
+            
+          # Fallback to plan-output.txt
+          elif [ -f "$plan_artifact/plan-output.txt" ]; then
+            echo "📋 Plan Output:"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            cat "$plan_artifact/plan-output.txt"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "✅ Plan output displayed successfully"
+            
+          # Check for tfplan.txt (your original attempt)
+          elif [ -f "$plan_artifact/tfplan.txt" ]; then
+            echo "📋 Terraform Plan (show output):"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            cat "$plan_artifact/tfplan.txt"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "✅ Terraform show output displayed successfully"
+            
+          else
+            echo "⚠️ No readable plan files found in this artifact"
+            echo "Available files:"
+            ls -la "$plan_artifact/" || echo "No files found"
+            
+            if [ -f "$plan_artifact/tfplan" ]; then
+              echo ""
+              echo "📄 Binary plan file exists (size: $(stat -c%s "$plan_artifact/tfplan") bytes)"
+              echo "💡 Plan was generated but text output wasn't saved properly"
+            fi
+          fi
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "##[endgroup]"
+          echo ""
+
+          PLAN_COUNT=$((PLAN_COUNT + 1))
+        fi
+      done
+
+      if [ $PLAN_COUNT -eq 0 ]; then
+        echo "##vso[task.logissue type=error]No plans found for environment ${{ parameters.environment }}!"
+        echo "Available artifacts:"
+        ls -la $(Pipeline.Workspace)/build-artifacts/
+        exit 1
+      fi
+
+      echo "##[section]✅ Found $PLAN_COUNT plan(s) for review"
+
+    displayName: "Display Terraform Plan Text Files"
+
+# ====================================================================
+# Manual Approval
+# ====================================================================
+- ${{ if eq(parameters.requiresApproval, true) }}:
+  - job: Wait_For_Approval
+    displayName: "⏸️ Approval Required - ${{ upper(parameters.environment) }}"
+    pool: server
+    dependsOn: Preview_Plan
+    steps:
+    - task: ManualValidation@0
+      displayName: "Approve ${{ upper(parameters.environment) }} Deployment"
+      inputs:
+        notifyUsers: ${{ parameters.notifyUsers }}
+        instructions: |
+          🚀 Deploy Build ${{ parameters.buildId }} to ${{ upper(parameters.environment) }}?
+          
+          📋 The original Terraform plans from Build ${{ parameters.buildId }} are displayed above.
+          
+          🔍 Review the plan outputs to verify:
+          • Resource changes align with expectations
+          • No unexpected additions (+), modifications (~), or deletions (-)
+          • Plan summary matches your intended changes
+          
+          💡 This shows the EXACT same plan that was generated in the successful build.
+          
+          ⚠️ Only approve if the plan output looks correct.
+          
+          Click "Resume" to deploy or "Reject" to cancel.
+
+# ====================================================================
+# DEPLOY FROM BUILD
+# ====================================================================
+- job: Deploy_From_Build
+  displayName: "🚀 Deploy Build ${{ parameters.buildId }} to ${{ upper(parameters.environment) }}"
+  pool:
+    name: ${{ parameters.poolName }}
+  variables:
+    - group: ${{ parameters.variableGroup }}
+  ${{ if eq(parameters.requiresApproval, true) }}:
+    dependsOn: Wait_For_Approval
+  ${{ else }}:
+    dependsOn: Preview_Plan
+
+  steps:
+  - checkout: self
+
+  # Download build artifacts
+  - task: DownloadPipelineArtifact@2
+    displayName: "📥 Download Build ${{ parameters.buildId }}"
+    inputs:
+      source: 'specific'
+      project: '$(System.TeamProjectId)'
+      pipeline: 'Build Pipeline'
+      buildVersionToDownload: 'specific'
+      buildId: ${{ parameters.buildId }}
+      patterns: 'tfplan-${{ parameters.environment }}-**/*'
+      targetPath: '$(Pipeline.Workspace)/build-artifacts'
+
+  # Verify and copy plans
+  - script: |
+      set -e
+
+      echo "##[section]=== Copying Plans from Build ${{ parameters.buildId }} ==="
+
+      PLAN_COUNT=0
+
+      for plan_artifact in $(Pipeline.Workspace)/build-artifacts/tfplan-${{ parameters.environment }}-*; do
+        if [ -d "$plan_artifact" ] && [ -f "$plan_artifact/tfplan" ]; then
+
+          artifact_name=$(basename "$plan_artifact")
+          layer_path=$(echo "$artifact_name" | sed 's/^tfplan-${{ parameters.environment }}-//' | tr '-' '/')
+
+          workspace_path="$(Build.SourcesDirectory)/$layer_path/${{ parameters.environment }}"
+
+          echo "Copying plan to: $layer_path"
+          mkdir -p "$workspace_path"
+          cp "$plan_artifact/tfplan" "$workspace_path/tfplan"
+
+          PLAN_COUNT=$((PLAN_COUNT + 1))
+        fi
+      done
+
+      if [ $PLAN_COUNT -eq 0 ]; then
+        echo "##vso[task.logissue type=error]No plans found!"
+        exit 1
+      fi
+
+      echo "✅ Copied $PLAN_COUNT plan(s)"
+    displayName: "Copy Build Plans to Workspace"
+
+  - template: install-azure-cli.yaml
+
+  - template: azure-oidc-auth.yaml
+    parameters:
+      serviceConnection: ${{ parameters.serviceConnection }}
+
+  - template: install-tools.yaml
+    parameters:
+      terragruntVersion: ${{ parameters.terragruntVersion }}
+      terraformVersion: ${{ parameters.terraformVersion }}
+
+  - ${{ each layer in parameters.layers }}:
+    - template: terragrunt-init.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ layer }}
+        displayName: '🔄 Init - ${{ layer }}'
+
+    - template: terragrunt-apply.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ layer }}
+
+  - template: upload-to-blob.yaml
+    parameters:
+      environment: ${{ parameters.environment }}
+      serviceConnection: ${{ parameters.serviceConnection }}

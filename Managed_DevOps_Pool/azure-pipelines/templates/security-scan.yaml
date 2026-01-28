@@ -1,0 +1,297 @@
+parameters:
+  - name: terraformPath
+    type: string
+  - name: failOnFindings
+    type: boolean
+  - name: environment
+    type: string
+
+steps:
+  - task: Bash@3
+    displayName: "Install Checkov"
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+
+        echo "📦 Installing Checkov (latest version)..."
+        pip3 install --quiet --upgrade checkov
+        checkov --version
+        echo "✅ Checkov installed successfully"
+
+  - task: Bash@3
+    displayName: "Run Checkov Security Scan (Terraform + Terragrunt)"
+    env:
+      REPORT_DIR: $(Build.ArtifactStagingDirectory)/security-reports
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+
+        echo "🔍 Running Checkov security scan..."
+        echo "Environment: ${{ parameters.environment }}"
+        echo "Scanning: ${{ parameters.terraformPath }}"
+        echo "Report directory: $REPORT_DIR"
+        echo ""
+
+        mkdir -p "$REPORT_DIR"
+        CHECKOV_EXIT_CODE=0
+
+        if [ "${{ parameters.failOnFindings }}" == "false" ]; then
+          echo "ℹ️ Soft fail mode enabled"
+          SOFT_FAIL="--soft-fail"
+        else
+          echo "⚠️ Hard fail mode enabled"
+          SOFT_FAIL=""
+        fi
+
+        # ═══════════════════════════════════════════════════════════
+        # Count files BEFORE running Checkov
+        # ═══════════════════════════════════════════════════════════
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📂 Pre-Scan File Discovery"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        # Count actual files in the filesystem
+        TOTAL_TF_FILES=$(find ${{ parameters.terraformPath }} -type f -name "*.tf" | wc -l)
+        TOTAL_HCL_FILES=$(find ${{ parameters.terraformPath }} -type f -name "*.hcl" | wc -l)
+
+        echo "📄 Files in workspace:"
+        echo "  • Terraform files (.tf):     $TOTAL_TF_FILES files"
+        echo "  • Terragrunt files (.hcl):   $TOTAL_HCL_FILES files"
+        echo ""
+
+        # Show sample files
+        if [ $TOTAL_TF_FILES -gt 0 ]; then
+          echo "  📋 Sample .tf files found:"
+          find ${{ parameters.terraformPath }} -type f -name "*.tf" | head -5 | sed 's/^/     • /'
+          if [ $TOTAL_TF_FILES -gt 5 ]; then
+            echo "     ... and $((TOTAL_TF_FILES - 5)) more"
+          fi
+          echo ""
+        fi
+
+        if [ $TOTAL_HCL_FILES -gt 0 ]; then
+          echo "  📋 Sample .hcl files found:"
+          find ${{ parameters.terraformPath }} -type f -name "*.hcl" | head -5 | sed 's/^/     • /'
+          if [ $TOTAL_HCL_FILES -gt 5 ]; then
+            echo "     ... and $((TOTAL_HCL_FILES - 5)) more"
+          fi
+          echo ""
+        fi
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📊 Checkov Security Scan Results"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        # Run Checkov
+        checkov -d ${{ parameters.terraformPath }} \
+          --framework terraform \
+          --compact \
+          --quiet \
+          --skip-download \
+          --output cli \
+          --output json \
+          --output junitxml \
+          --output-file-path "$REPORT_DIR" \
+          $SOFT_FAIL > "$REPORT_DIR/checkov-output.txt" 2>&1 || CHECKOV_EXIT_CODE=$?
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Parse and display summary
+        if [ -f "$REPORT_DIR/results_json.json" ]; then
+          echo "📊 Scan Summary:"
+          echo ""
+
+          # Extract summary using jq
+          if command -v jq &> /dev/null; then
+            PASSED=$(jq -r '.summary.passed // 0' "$REPORT_DIR/results_json.json")
+            FAILED=$(jq -r '.summary.failed // 0' "$REPORT_DIR/results_json.json")
+            SKIPPED=$(jq -r '.summary.skipped // 0' "$REPORT_DIR/results_json.json")
+            TOTAL_RESOURCES=$(jq -r '.summary.resource_count // 0' "$REPORT_DIR/results_json.json")
+
+            echo "  ✅ Passed checks:  $PASSED"
+            echo "  ❌ Failed checks:  $FAILED"
+            echo "  ⏭️  Skipped checks: $SKIPPED"
+            echo "  📦 Resources scanned: $TOTAL_RESOURCES"
+          else
+            echo "  Report saved to: $REPORT_DIR/results_json.json"
+          fi
+
+          echo ""
+
+          # Show files that were ACTUALLY CHECKED by Checkov
+          if command -v jq &> /dev/null; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📂 Files Analyzed by Checkov:"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+
+            # Count files that had checks run
+            TF_FILES_WITH_CHECKS=$(jq -r '
+              [
+                (.results.passed_checks // [])[],
+                (.results.failed_checks // [])[],
+                (.results.skipped_checks // [])[]
+              ]
+              | map(select(.file_path | endswith(".tf")) | .file_path)
+              | unique
+              | length
+            ' "$REPORT_DIR/results_json.json" 2>/dev/null || echo "0")
+
+            HCL_FILES_WITH_CHECKS=$(jq -r '
+              [
+                (.results.passed_checks // [])[],
+                (.results.failed_checks // [])[],
+                (.results.skipped_checks // [])[]
+              ]
+              | map(select(.file_path | endswith(".hcl")) | .file_path)
+              | unique
+              | length
+            ' "$REPORT_DIR/results_json.json" 2>/dev/null || echo "0")
+
+            echo "  📊 File Analysis Summary:"
+            echo "    ┌─────────────────────────────────────────────┐"
+            echo "    │                    .tf files                │"
+            echo "    ├─────────────────────────────────────────────┤"
+            echo "    │  Total in workspace:        $TOTAL_TF_FILES"
+            echo "    │  With security checks:      $TF_FILES_WITH_CHECKS"
+            echo "    │  No checks (variables/etc): $((TOTAL_TF_FILES - TF_FILES_WITH_CHECKS))"
+            echo "    └─────────────────────────────────────────────┘"
+            echo ""
+            echo "    ┌─────────────────────────────────────────────┐"
+            echo "    │                   .hcl files                │"
+            echo "    ├─────────────────────────────────────────────┤"
+            echo "    │  Total in workspace:        $TOTAL_HCL_FILES"
+            echo "    │  With security checks:      $HCL_FILES_WITH_CHECKS"
+            echo "    │  No checks (not scanned):   $((TOTAL_HCL_FILES - HCL_FILES_WITH_CHECKS))"
+            echo "    └─────────────────────────────────────────────┘"
+            echo ""
+
+            # Show which .tf files had checks
+            if [ "$TF_FILES_WITH_CHECKS" -gt 0 ]; then
+              echo "  ✅ .tf files with security checks:"
+              jq -r '
+                [
+                  (.results.passed_checks // [])[],
+                  (.results.failed_checks // [])[],
+                  (.results.skipped_checks // [])[]
+                ]
+                | map(select(.file_path | endswith(".tf")) | .file_path)
+                | unique
+                | .[]
+              ' "$REPORT_DIR/results_json.json" 2>/dev/null | sed 's/^/     • /' || echo "     (Unable to list files)"
+              echo ""
+            fi
+
+            # Warn about .hcl files
+            if [ $TOTAL_HCL_FILES -gt 0 ] && [ $HCL_FILES_WITH_CHECKS -eq 0 ]; then
+              echo "  ⚠️  WARNING: No .hcl files were scanned!"
+              echo "     Checkov cannot scan Terragrunt configuration files."
+              echo "     Your root.hcl and terragrunt.hcl files are NOT being checked."
+              echo "     Recommendation: Use the hcl-security-scan.yaml template."
+              echo ""
+            fi
+
+            # Explain why some .tf files weren't checked
+            if [ $TOTAL_TF_FILES -gt $TF_FILES_WITH_CHECKS ]; then
+              echo "  ℹ️  Note: $((TOTAL_TF_FILES - TF_FILES_WITH_CHECKS)) .tf files had no security checks"
+              echo "     Common reasons:"
+              echo "     • variables.tf - only contains variable definitions"
+              echo "     • outputs.tf - only contains output definitions"
+              echo "     • versions.tf - only contains version constraints"
+              echo "     These files are parsed but contain no resources to check."
+              echo ""
+            fi
+          fi
+
+          # Show security issues
+          if [ $FAILED -gt 0 ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔴 Security Issues (Failed Checks):"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+
+            if command -v jq &> /dev/null && [ -f "$REPORT_DIR/results_json.json" ]; then
+              # Get unique files with issues
+              FILES_WITH_ISSUES=$(jq -r '.results.failed_checks | map(.file_path) | unique | .[]' "$REPORT_DIR/results_json.json")
+
+              FILE_COUNT=0
+
+              # For each file, show its issues
+              while IFS= read -r file; do
+                FILE_COUNT=$((FILE_COUNT + 1))
+                ISSUE_COUNT=$(jq -r --arg file "$file" '[.results.failed_checks[] | select(.file_path == $file)] | length' "$REPORT_DIR/results_json.json")
+
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📄 File #$FILE_COUNT: $file"
+                echo "   Issues found: $ISSUE_COUNT"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+
+                # List all issues for this file
+                jq -r --arg file "$file" '
+                  [.results.failed_checks[] | select(.file_path == $file)]
+                  | .[]
+                  | "  ❌ \(.check_id): \(.check_name)\n" +
+                    "     Line: \(.file_line_range[0])\n" +
+                    "     Resource: \(.resource)\n"
+                ' "$REPORT_DIR/results_json.json"
+
+                echo ""
+              done <<< "$FILES_WITH_ISSUES"
+
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "📊 Summary: $FAILED total issues across $FILE_COUNT files"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo ""
+            fi
+          fi
+        fi
+
+        # Show where to find full results
+        echo "📁 Full Results Available:"
+        echo "  • CLI Output:  $REPORT_DIR/checkov-output.txt"
+        echo "  • JSON Report: $REPORT_DIR/results_json.json"
+        echo "  • JUnit XML:   $REPORT_DIR/results_junitxml.xml"
+        echo ""
+        echo "💡 View detailed results in the pipeline artifacts"
+        echo ""
+
+        # Handle exit code
+        if [ $CHECKOV_EXIT_CODE -ne 0 ] && [ "${{ parameters.failOnFindings }}" == "true" ]; then
+          echo "##vso[task.logissue type=error]❌ Checkov found $FAILED security issues"
+          echo ""
+          echo "🛑 Pipeline will fail due to security findings"
+          exit $CHECKOV_EXIT_CODE
+        elif [ $CHECKOV_EXIT_CODE -ne 0 ]; then
+          echo "##vso[task.logissue type=warning]⚠️ Checkov found $FAILED security issues (not failing pipeline)"
+          echo ""
+          echo "ℹ️ Review the issues above and fix them in future commits"
+        else
+          echo "✅ No security issues found by Checkov"
+          echo ""
+          echo "🎉 All security checks passed!"
+        fi
+    continueOnError: ${{ not(parameters.failOnFindings) }}
+
+  - task: PublishTestResults@2
+    displayName: "Publish Checkov Test Results"
+    condition: always()
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '$(Build.ArtifactStagingDirectory)/security-reports/results_junitxml.xml'
+      testRunTitle: 'Checkov Security Scan - ${{ parameters.environment }}'
+      mergeTestResults: true
+      failTaskOnFailedTests: ${{ parameters.failOnFindings }}
+
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish Security Reports"
+    condition: always()
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/security-reports'
+      artifact: 'checkov-security-reports-${{ parameters.environment }}'
+      publishLocation: 'pipeline'

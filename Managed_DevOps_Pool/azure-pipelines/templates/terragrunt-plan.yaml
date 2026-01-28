@@ -1,0 +1,82 @@
+parameters:
+  - name: environment
+    type: string
+  - name: basePath
+    type: string
+
+steps:
+  - task: Bash@3
+    displayName: "Terragrunt Plan - ${{ upper(parameters.environment) }}"
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+        cd "${{ parameters.basePath }}/${{ parameters.environment }}"
+
+        # Set environment variable for terragrunt
+        export ENVIRONMENT="${{ parameters.environment }}"
+
+        echo "🔄 Generating fresh ${{ upper(parameters.environment) }} plan..."
+        
+        # Run terragrunt plan and capture output while also displaying it
+        if terragrunt plan -out=tfplan -no-color 2>&1 | tee plan-output.txt; then
+          echo ""
+          echo "✅ ${{ upper(parameters.environment) }} plan generated successfully."
+          
+          # Check the plan output and highlight the result
+          if grep -q "No changes\|Your infrastructure matches the configuration" plan-output.txt; then
+            echo "##[section]🎉 Infrastructure Status: No Changes Needed"
+            echo "##[command]✅ Your infrastructure matches the configuration - no changes required!"
+          elif grep -q "Plan: [0-9]* to add, [0-9]* to change, [0-9]* to destroy" plan-output.txt; then
+            PLAN_SUMMARY=$(grep "Plan: [0-9]* to add, [0-9]* to change, [0-9]* to destroy" plan-output.txt | head -1)
+            echo "##[section]📋 Infrastructure Changes Required"
+            echo "##[warning]⚠️ $PLAN_SUMMARY"
+          else
+            echo "##[section]📋 Plan Completed"
+            echo "##[command]ℹ️ Check the output above for plan details"
+          fi
+          
+          # Also save the plan output to a separate summary file with metadata
+          echo "=== TERRAFORM PLAN SUMMARY ===" > plan-summary.txt
+          echo "Environment: ${{ upper(parameters.environment) }}" >> plan-summary.txt
+          echo "Layer: ${{ parameters.basePath }}" >> plan-summary.txt
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> plan-summary.txt
+          echo "Build ID: $(Build.BuildId)" >> plan-summary.txt
+          echo "" >> plan-summary.txt
+          echo "=== PLAN OUTPUT ===" >> plan-summary.txt
+          cat plan-output.txt >> plan-summary.txt
+          
+          echo ""
+          echo "📄 Plan output saved to files:"
+          echo "- plan-output.txt: Full terraform plan output"
+          echo "- plan-summary.txt: Formatted plan summary"
+          ls -lh plan-output.txt plan-summary.txt
+          
+        else
+          echo "##[error]❌ ERROR: Terragrunt plan failed for ${{ upper(parameters.environment) }}."
+          echo "---- Plan output: ----"
+          cat plan-output.txt 2>/dev/null || echo "No output file generated"
+          echo "----------------------"
+          exit 1
+        fi
+
+        # Copy tfplan from terragrunt cache to current directory for artifact publishing
+        echo ""
+        echo "🔄 Locating and copying tfplan from terragrunt cache..."
+        TFPLAN_PATH=$(find .terragrunt-cache -name "tfplan" -type f | head -1)
+        if [ -n "$TFPLAN_PATH" ] && [ -f "$TFPLAN_PATH" ]; then
+          echo "Found tfplan at: $TFPLAN_PATH"
+          cp "$TFPLAN_PATH" ./tfplan
+          echo "✅ tfplan copied to current directory (size: $(stat -c%s tfplan) bytes)"
+          
+          echo ""
+          echo "📂 Files ready for publishing:"
+          ls -lh tfplan plan-output.txt plan-summary.txt
+        else
+          echo "##[error]❌ ERROR: Could not find tfplan file in terragrunt cache"
+          exit 1
+        fi
+    env:
+      TF_VAR_pat_value: $(azure-devops-pat-${{ parameters.environment }})
+      TF_VAR_admin_ssh_public_key: $(admin-ssh-public-key-${{ parameters.environment }})
+      TF_VAR_client_secret_vmss: $(vmss-agent-pool-sp-secret-${{ parameters.environment }})

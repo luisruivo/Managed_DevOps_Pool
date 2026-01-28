@@ -1,0 +1,89 @@
+name: Build Pipeline
+
+trigger:
+  branches:
+    include:
+      - 'feature/*'
+      - 'bugfix/*'
+      - 'hotfix/*'
+      - 'main'
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  # Tool versions
+  - name: terraformVersion
+    value: "1.13.1"
+  - name: terragruntVersion
+    value: "0.86.0"
+
+  # Terraform and Terragrunt Paths
+  - name: terraformPath
+    value: "infrastructure"
+  - name: terragruntPath
+    value: "infrastructure"
+
+  # Terragrunt base paths
+  - name: basePathTerragruntBootstrap
+    value: 'infrastructure/layers/bootstrap/environments'
+  - name: basePathTerragruntInfra
+    value: 'infrastructure/layers/infra/environments'
+
+  # Placeholder variable for displayName in stages
+  - name: displayName
+    value: ''
+
+parameters:
+  - name: environments
+    type: object
+    default:
+      - name: dev
+        poolName: 'devops-agent-pool-dev-core'  # Change this for the other self-hosted agent solutions: 'vmss-devops-agents-dev-core' or 'classic-vmss-devops-agents-dev-core'
+        variableGroup: 'pipeline-secrets-dev'
+        serviceConnection: 'azure-oidc-dev'
+        failOnSecurityFindings: false           # Dev: warnings only
+        condition: |
+          or(
+            startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'),
+            startsWith(variables['Build.SourceBranch'], 'refs/heads/bugfix/'),
+            startsWith(variables['Build.SourceBranch'], 'refs/heads/hotfix/'),
+            eq(variables['Build.SourceBranch'], 'refs/heads/main')
+          )
+      # - name: test
+      #   poolName: 'devops-agent-pool-test-core' # Change this for the other self-hosted agent solutions: 'vmss-devops-agents-test-core' or 'classic-vmss-devops-agents-test-core'
+      #   variableGroup: 'pipeline-secrets-test'
+      #   serviceConnection: 'azure-oidc-test'
+      #   failOnSecurityFindings: true           # Test: fail on issues
+      #   condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+      # - name: prod
+      #   poolName: 'devops-agent-pool-prod-core' # Change this for the other self-hosted agent solutions: 'vmss-devops-agents-prod-core' or 'classic-vmss-devops-agents-prod-core'
+      #   variableGroup: 'pipeline-secrets-prod'
+      #   serviceConnection: 'azure-oidc-prod'
+      #   failOnSecurityFindings: true           # Prod: fail on issues
+      #   condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+
+stages:
+- ${{ each env in parameters.environments }}:
+  - stage: Build_${{ upper(env.name) }}
+    displayName: '🔨 Build & Validate Infrastructure - ${{ upper(env.name) }}'
+    condition: ${{ env.condition }}
+    variables:
+      - group: ${{ env.variableGroup }}
+    jobs:
+    - template: templates/lint-and-validate.yaml
+      parameters:
+        environment: ${{ env.name }}
+        poolName: ${{ env.poolName }}
+        variableGroup: ${{ env.variableGroup }}
+        serviceConnection: ${{ env.serviceConnection }}
+        terragruntVersion: ${{ variables.terragruntVersion }}
+        terraformVersion: ${{ variables.terraformVersion }}
+        terraformPath: ${{ variables.terraformPath }}
+        terragruntPath: ${{ variables.terragruntPath }}
+        failOnSecurityFindings: ${{ env.failOnSecurityFindings }}
+        paths:
+          # - ${{ variables.basePathTerragruntBootstrap }} # To run bootstrap layer
+          - ${{ variables.basePathTerragruntInfra }}     # To run infra layer

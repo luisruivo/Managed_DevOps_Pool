@@ -1,0 +1,344 @@
+parameters:
+  - name: environment
+    type: string
+  - name: failOnFindings
+    type: boolean
+
+steps:
+  - task: Bash@3
+    displayName: "HCL Security Scan - ${{ upper(parameters.environment) }}"
+    inputs:
+      targetType: inline
+      script: |
+        set -euo pipefail
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔒 Security Scan Terragrunt HCL - ${{ upper(parameters.environment) }}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Environment: ${{ parameters.environment }}"
+        echo ""
+
+        ISSUES_FOUND=0
+        REPORT_DIR=$(Build.ArtifactStagingDirectory)/hcl-security-reports
+        mkdir -p "$REPORT_DIR"
+
+        ISSUES_LOG="$REPORT_DIR/hcl-security-issues.txt"
+        SUMMARY_LOG="$REPORT_DIR/hcl-security-summary.json"
+
+        # Initialize JSON summary
+        echo '{"timestamp":"'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'","environment":"${{ parameters.environment }}","issues":[]}' > "$SUMMARY_LOG"
+
+        # Function to report issues
+        report_issue() {
+          local severity=$1
+          local rule_id=$2
+          local message=$3
+          local file=$4
+          local line=$5
+
+          ISSUES_FOUND=$((ISSUES_FOUND + 1))
+
+          # Log to text file
+          echo "[$severity] $rule_id: $message" >> "$ISSUES_LOG"
+          echo "  File: $file:$line" >> "$ISSUES_LOG"
+          echo "" >> "$ISSUES_LOG"
+
+          # Log to Azure DevOps
+          if [ "$severity" = "HIGH" ] || [ "$severity" = "CRITICAL" ]; then
+            echo "##vso[task.logissue type=error;sourcepath=$file;linenumber=$line;][$rule_id] $message"
+          else
+            echo "##vso[task.logissue type=warning;sourcepath=$file;linenumber=$line;][$rule_id] $message"
+          fi
+
+          # Append to JSON summary
+          jq --arg sev "$severity" \
+             --arg rule "$rule_id" \
+             --arg msg "$message" \
+             --arg file "$file" \
+             --arg line "$line" \
+             '.issues += [{
+               "severity": $sev,
+               "rule_id": $rule,
+               "message": $msg,
+               "file": $file,
+               "line": ($line | tonumber)
+             }]' "$SUMMARY_LOG" > "${SUMMARY_LOG}.tmp" && mv "${SUMMARY_LOG}.tmp" "$SUMMARY_LOG"
+        }
+
+        echo "🔍 Scanning Terragrunt HCL files for security issues..."
+        echo ""
+
+        # Find all root.hcl and terragrunt.hcl files in layers
+        HCL_FILES=$(find infrastructure/layers -type f \( -name "root.hcl" -o -name "terragrunt.hcl" \))
+
+        if [ -z "$HCL_FILES" ]; then
+          echo "⚠️  No HCL files found in infrastructure/layers"
+          echo '{"summary":{"total_issues":0,"files_scanned":0}}' | jq -s '.[0] * .[1]' "$SUMMARY_LOG" - > "${SUMMARY_LOG}.tmp" && mv "${SUMMARY_LOG}.tmp" "$SUMMARY_LOG"
+          exit 0
+        fi
+
+        FILES_SCANNED=$(echo "$HCL_FILES" | wc -l)
+        echo "📁 Found $FILES_SCANNED HCL files to scan"
+        echo ""
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 1: NSG Rules - No Internet Source
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-001: Checking NSG rules for unrestricted Internet access..."
+        while IFS= read -r file; do
+          # Check for Internet as source
+          if grep -n 'source_address_prefix[[:space:]]*=[[:space:]]*"Internet"' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'source_address_prefix[[:space:]]*=[[:space:]]*"Internet"' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-001" "NSG rule allows unrestricted Internet ingress" "$file" "$LINE"
+          fi
+
+          # Check for 0.0.0.0/0 (equivalent to Internet)
+          if grep -n 'source_address_prefix[[:space:]]*=[[:space:]]*"0\.0\.0\.0/0"' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'source_address_prefix[[:space:]]*=[[:space:]]*"0\.0\.0\.0/0"' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-001" "NSG rule allows unrestricted Internet ingress (0.0.0.0/0)" "$file" "$LINE"
+          fi
+
+          # Check for * (any source)
+          if grep -n 'source_address_prefix[[:space:]]*=[[:space:]]*"\*"' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'source_address_prefix[[:space:]]*=[[:space:]]*"\*"' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-001" "NSG rule allows traffic from any source (*)" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 2: Public Network Access
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-002: Checking for public network access..."
+        while IFS= read -r file; do
+          if grep -n 'public_network_access_enabled[[:space:]]*=[[:space:]]*true' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'public_network_access_enabled[[:space:]]*=[[:space:]]*true' "$file" | head -1 | cut -d: -f1)
+
+            # Adjust severity based on environment
+            if [ "${{ parameters.environment }}" = "prod" ]; then
+              report_issue "CRITICAL" "HCL-002" "Public network access enabled in PRODUCTION environment" "$file" "$LINE"
+            else
+              report_issue "HIGH" "HCL-002" "Public network access enabled" "$file" "$LINE"
+            fi
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 3: Encryption at Host
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-003: Checking for disabled encryption at host..."
+        while IFS= read -r file; do
+          if grep -n 'encryption_at_host_enabled[[:space:]]*=[[:space:]]*false' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'encryption_at_host_enabled[[:space:]]*=[[:space:]]*false' "$file" | head -1 | cut -d: -f1)
+            report_issue "MEDIUM" "HCL-003" "Encryption at host is disabled" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 4: Password Authentication
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-004: Checking for password authentication..."
+        while IFS= read -r file; do
+          if grep -n 'disable_password_authentication[[:space:]]*=[[:space:]]*false' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'disable_password_authentication[[:space:]]*=[[:space:]]*false' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-004" "Password authentication is enabled (use SSH keys instead)" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 5: Storage Account Network Access
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-005: Checking Storage Account network configuration..."
+        while IFS= read -r file; do
+          if grep -n 'default_action[[:space:]]*=[[:space:]]*"Allow"' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'default_action[[:space:]]*=[[:space:]]*"Allow"' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-005" "Storage Account allows network access by default (should be Deny)" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 6: TLS Version
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-006: Checking TLS version configuration..."
+        while IFS= read -r file; do
+          if grep -n 'min_tls_version[[:space:]]*=[[:space:]]*"TLS1_[01]"' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'min_tls_version[[:space:]]*=[[:space:]]*"TLS1_[01]"' "$file" | head -1 | cut -d: -f1)
+            report_issue "MEDIUM" "HCL-006" "TLS version is set to 1.0 or 1.1 (use TLS 1.2 or higher)" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 7: HTTPS Only
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-007: Checking HTTPS enforcement..."
+        while IFS= read -r file; do
+          if grep -n 'https_only[[:space:]]*=[[:space:]]*false' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'https_only[[:space:]]*=[[:space:]]*false' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-007" "HTTPS-only access is not enforced" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 8: Secure Transfer Required
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-008: Checking secure transfer requirement..."
+        while IFS= read -r file; do
+          if grep -n 'enable_https_traffic_only[[:space:]]*=[[:space:]]*false' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'enable_https_traffic_only[[:space:]]*=[[:space:]]*false' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-008" "Secure transfer (HTTPS) is not required for Storage Account" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 9: Secrets in Environment Variables
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-009: Checking for secrets in environment variables..."
+        while IFS= read -r file; do
+          # Check for common secret patterns in get_env()
+          if grep -n 'get_env.*[Pp]at\|[Pp]assword\|[Ss]ecret\|[Kk]ey\|[Tt]oken' "$file" | grep -v 'TF_VAR_' > /dev/null 2>&1; then
+            while IFS=: read -r line_num match; do
+              # Only flag if not using TF_VAR_ prefix (which is safer)
+              if ! echo "$match" | grep -q 'TF_VAR_'; then
+                report_issue "HIGH" "HCL-009" "Potential secret in environment variable: $match" "$file" "$line_num"
+              fi
+            done < <(grep -n 'get_env.*[Pp]at\|[Pp]assword\|[Ss]ecret\|[Kk]ey\|[Tt]oken' "$file" | grep -v 'TF_VAR_')
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 10: RBAC Authorization Disabled
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-010: Checking RBAC authorization..."
+        while IFS= read -r file; do
+          if grep -n 'enable_rbac_authorization[[:space:]]*=[[:space:]]*false' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'enable_rbac_authorization[[:space:]]*=[[:space:]]*false' "$file" | head -1 | cut -d: -f1)
+            report_issue "HIGH" "HCL-010" "RBAC authorization is disabled (use RBAC over access policies)" "$file" "$LINE"
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 11: Purge Protection Disabled
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-011: Checking purge protection..."
+        while IFS= read -r file; do
+          if grep -n 'purge_protection_enabled[[:space:]]*=[[:space:]]*false' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'purge_protection_enabled[[:space:]]*=[[:space:]]*false' "$file" | head -1 | cut -d: -f1)
+
+            if [ "${{ parameters.environment }}" = "prod" ]; then
+              report_issue "CRITICAL" "HCL-011" "Purge protection disabled in PRODUCTION (prevents accidental deletion)" "$file" "$LINE"
+            else
+              report_issue "MEDIUM" "HCL-011" "Purge protection disabled (consider enabling for data safety)" "$file" "$LINE"
+            fi
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 12: Open Access to DevOps Pools
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-012: Checking DevOps pool access controls..."
+        while IFS= read -r file; do
+          if grep -n 'open_access[[:space:]]*=[[:space:]]*true' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'open_access[[:space:]]*=[[:space:]]*true' "$file" | head -1 | cut -d: -f1)
+
+            if [ "${{ parameters.environment }}" = "prod" ]; then
+              report_issue "HIGH" "HCL-012" "DevOps pool has open access in PRODUCTION (restrict to authorized projects)" "$file" "$LINE"
+            else
+              report_issue "MEDIUM" "HCL-012" "DevOps pool has open access (consider restricting to specific projects)" "$file" "$LINE"
+            fi
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule 13: VM Instance Count > 0 in Non-Prod
+        # ═══════════════════════════════════════════════════════════
+        echo "📋 Rule HCL-013: Checking for always-on instances..."
+        while IFS= read -r file; do
+          if grep -n 'vmss_instance_count[[:space:]]*=[[:space:]]*[1-9][0-9]*' "$file" > /dev/null 2>&1; then
+            LINE=$(grep -n 'vmss_instance_count[[:space:]]*=[[:space:]]*[1-9][0-9]*' "$file" | head -1 | cut -d: -f1)
+            COUNT=$(grep 'vmss_instance_count[[:space:]]*=' "$file" | sed 's/.*=[[:space:]]*//' | tr -d ' ')
+
+            if [ "${{ parameters.environment }}" != "prod" ]; then
+              report_issue "LOW" "HCL-013" "VMSS instance_count is $COUNT in non-production (consider 0 to save costs)" "$file" "$LINE"
+            fi
+          fi
+        done <<< "$HCL_FILES"
+
+        # ═══════════════════════════════════════════════════════════
+        # Rule HCL-014: Production-Specific Hardening
+        # ═══════════════════════════════════════════════════════════
+        if [ "${{ parameters.environment }}" = "prod" ]; then
+          echo "📋 Rule HCL-014: Enforcing production security hardening..."
+
+          # Check for public_network_access in prod
+          while IFS= read -r file; do
+            if grep -n 'public_network_access_enabled[[:space:]]*=[[:space:]]*true' "$file" > /dev/null 2>&1; then
+              LINE=$(grep -n 'public_network_access_enabled[[:space:]]*=[[:space:]]*true' "$file" | head -1 | cut -d: -f1)
+              report_issue "CRITICAL" "HCL-014" "Public network access MUST be disabled in production" "$file" "$LINE"
+            fi
+
+            if grep -n 'network_acls_default_action[[:space:]]*=[[:space:]]*"Allow"' "$file" > /dev/null 2>&1; then
+              LINE=$(grep -n 'network_acls_default_action[[:space:]]*=[[:space:]]*"Allow"' "$file" | head -1 | cut -d: -f1)
+              report_issue "CRITICAL" "HCL-014" "Network ACLs MUST default to Deny in production" "$file" "$LINE"
+            fi
+          done <<< "$HCL_FILES"
+        fi
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Update summary with totals
+        jq --argjson total "$ISSUES_FOUND" \
+           --argjson scanned "$FILES_SCANNED" \
+           '. + {"summary":{"total_issues":$total,"files_scanned":$scanned}}' \
+           "$SUMMARY_LOG" > "${SUMMARY_LOG}.tmp" && mv "${SUMMARY_LOG}.tmp" "$SUMMARY_LOG"
+
+        # Display results
+        if [ $ISSUES_FOUND -eq 0 ]; then
+          echo "✅ No security issues found in HCL files"
+          echo ""
+          echo "📊 Scan Summary:"
+          echo "  • Files scanned: $FILES_SCANNED"
+          echo "  • Issues found: 0"
+          echo ""
+          echo "🎉 All Terragrunt configurations passed security validation!"
+        else
+          echo "❌ Found $ISSUES_FOUND security issue(s) in HCL files:"
+          echo ""
+
+          # Display grouped by severity
+          if command -v jq &> /dev/null; then
+            CRITICAL=$(jq '[.issues[] | select(.severity == "CRITICAL")] | length' "$SUMMARY_LOG")
+            HIGH=$(jq '[.issues[] | select(.severity == "HIGH")] | length' "$SUMMARY_LOG")
+            MEDIUM=$(jq '[.issues[] | select(.severity == "MEDIUM")] | length' "$SUMMARY_LOG")
+            LOW=$(jq '[.issues[] | select(.severity == "LOW")] | length' "$SUMMARY_LOG")
+
+            echo "📊 Issues by Severity:"
+            [ "$CRITICAL" -gt 0 ] && echo "  🔴 CRITICAL: $CRITICAL"
+            [ "$HIGH" -gt 0 ] && echo "  🟠 HIGH:     $HIGH"
+            [ "$MEDIUM" -gt 0 ] && echo "  🟡 MEDIUM:   $MEDIUM"
+            [ "$LOW" -gt 0 ] && echo "  🟢 LOW:      $LOW"
+            echo ""
+          fi
+
+          echo "📄 Detailed Issues:"
+          cat "$ISSUES_LOG"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+                    if [ "${{ parameters.failOnFindings }}" = "true" ]; then
+            echo "🛑 Pipeline will fail due to HCL security findings"
+            exit 1
+          else
+            echo "⚠️  HCL security issues found (not failing pipeline)"
+            echo "ℹ️  Review and fix these issues in future commits"
+          fi
+        fi
+    continueOnError: ${{ not(parameters.failOnFindings) }}
+
+  - task: PublishPipelineArtifact@1
+    displayName: "Publish HCL Security Reports"
+    condition: always()
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/hcl-security-reports'
+      artifact: 'hcl-security-reports-${{ parameters.environment }}'
+      publishLocation: 'pipeline'

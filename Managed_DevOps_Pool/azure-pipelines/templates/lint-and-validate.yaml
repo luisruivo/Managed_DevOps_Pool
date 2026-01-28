@@ -1,0 +1,90 @@
+parameters:
+  - name: environment
+    type: string
+  - name: poolName
+    type: string
+  - name: variableGroup
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: terragruntVersion
+    type: string
+  - name: terraformVersion
+    type: string
+  - name: paths
+    type: object
+  - name: terraformPath
+    type: string
+  - name: terragruntPath
+    type: string
+  - name: failOnSecurityFindings
+    type: boolean
+
+jobs:
+- job: Lint_and_Validate
+  displayName: "🔍 Lint, Validate and Plan Terragrunt - ${{ upper(parameters.environment) }}"
+  pool:
+    name: ${{ parameters.poolName }}
+  variables:
+    - group: ${{ parameters.variableGroup }}
+
+  steps:
+  - checkout: self
+
+  - template: install-azure-cli.yaml
+
+  - template: install-tools.yaml
+    parameters:
+      terragruntVersion: ${{ parameters.terragruntVersion }}
+      terraformVersion: ${{ parameters.terraformVersion }}
+
+  - template: lint.yaml
+    parameters:
+      terraformPath: $(terraformPath)
+      terragruntPath: $(terragruntPath)
+
+  - template: security-scan.yaml
+    parameters:
+      terraformPath: ${{ parameters.terraformPath }}
+      failOnFindings: ${{ parameters.failOnSecurityFindings }}
+      environment: ${{ parameters.environment }}
+
+  - template: hcl-security-scan.yaml
+    parameters:
+      environment: ${{ parameters.environment }}
+      failOnFindings: ${{ parameters.failOnSecurityFindings }}
+
+  - ${{ each path in parameters.paths }}:
+    - template: azure-oidc-auth.yaml
+      parameters:
+        serviceConnection: ${{ parameters.serviceConnection }}
+
+    - template: terragrunt-init.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ path }}
+        displayName: 'Terragrunt Init - ${{ parameters.environment }} - ${{ path }}'
+
+    - template: terragrunt-validate.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ path }}
+        displayName: 'Terragrunt Validate - ${{ parameters.environment }} - ${{ path }}'
+
+    - template: terragrunt-plan.yaml
+      parameters:
+        environment: ${{ parameters.environment }}
+        basePath: ${{ path }}
+
+    - task: PublishPipelineArtifact@1
+      displayName: "Publish ${{ upper(parameters.environment) }} Plan Artifact - ${{ path }}"
+      inputs:
+        targetPath: '${{ path }}/${{ parameters.environment }}'
+        artifact: "tfplan-${{ parameters.environment }}-${{ replace(path, '/', '-') }}"
+
+    - task: PublishPipelineArtifact@1
+      displayName: "Publish ${{ upper(parameters.environment) }} Plan Text - ${{ path }}"
+      inputs:
+        targetPath: '${{ path }}/${{ parameters.environment }}/plan-summary.txt'
+        artifact: "tfplan-text-${{ parameters.environment }}-${{ replace(path, '/', '-') }}"
+      condition: succeeded()
